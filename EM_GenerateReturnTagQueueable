@@ -1,0 +1,104 @@
+/***********************************************************************
+* Class Name: EM_GenerateReturnTagQueueable                            *
+* Author: Anshul Agrawal                                               *
+* Date: Sep-2019                                                       *
+* Requirement/Project Name: CS-Flow (KLM - One Step Ahed)              *
+* Requirement/Project Description:                                     *
+*                                                                      *
+* This Queable class is used to generate the returnTag after the       *
+* attachment has been inserted. This is used to create the seprate     *
+* transaction to avoid XSRF issued when rendering visualforce page     *
+*                                                                      *
+* Revision:                                                            *
+* 	                                                                   *
+***********************************************************************/
+
+public with sharing class EM_GenerateReturnTagQueueable implements System.Queueable, Database.AllowsCallouts{
+
+    private Id caseId;
+    private String eml;
+    private String ifaxNUmber;
+    private String ordNumber;
+    private String orgEmailAddress;
+    private Boolean sendTheReturnTag;
+
+    public EM_GenerateReturnTagQueueable(Id caseId, String eml, String ifaxNUmber, String ordNumber, String orgEmailAddress, Boolean sendTheReturnTag) {
+        this.caseId = caseId;
+        this.eml = eml;
+        this.ifaxNUmber = ifaxNUmber;
+        this.ordNumber = ordNumber;
+        this.orgEmailAddress = orgEmailAddress;
+        this.sendTheReturnTag = sendTheReturnTag;
+    }
+
+    /**
+     * queueable execute method
+     *
+     * @param context
+     */
+    public void execute(System.QueueableContext context) {
+        
+        List<String> emailAddress = new List<String>{eml};//here goes AEX email
+        String subj, bdy, attName;
+        Blob attBody;
+        //prepare the email for sending back to AEX
+        subj = '%%'+ifaxNUmber+'%';
+        bdy='';
+        attName = 'Return_Tag_EO_'+ordNumber+'.pdf';
+        try {
+            //handle queued transactions
+            if (caseId != null) {
+                List<Attachment> attList = [Select Id,Name, parentId from Attachment where ParentId =:caseId];
+                //call the VF page
+                PageReference pdfAtt = Page.returnTagPage;
+                pdfAtt.getParameters().put('Id',caseId); // here we need to add the actual case id created
+                pdfAtt.getParameters().put('attId',attList[0].Id); 
+                if(Test.isRunningTest()){
+                    attBody = EncodingUtil.base64Decode('VGhpcyBpcyBmb3IgdGhlIHVuaXQgdGVzdGluZyBwdXJwb3NlcyBvbmx5IDotKQ==');
+                    createFile(attBody, CaseId, ordNumber);
+                }else{
+                    attBody = pdfAtt.getContentAsPDF();
+                    createFile(attBody, CaseId, ordNumber);
+                    if (sendTheReturnTag) {
+                        String defineFrom = null;
+                        //System.debug('email used to send >>'+orgEmailAddress);
+                        OrgWideEmailAddress[] owea = [select Id from OrgWideEmailAddress where Address =:orgEmailAddress LIMIT 1];
+                        if (owea != null && owea.size() > 0) { defineFrom = owea[0].Id; }
+                    
+                        Util_Api.sendEmailWithBlobAttachment(defineFrom, emailAddress, subj, bdy, attBody, attName);          
+                    }
+                } 
+            }
+        }catch (Exception e){
+            system.debug('Exception occurred in queueable EM_GenerateReturnTagQueueable job '+e.getMessage());
+        }
+    }
+    
+    /**
+    * this method will attach the file to the case 
+    * @param fileContent 
+    * @param caseId 
+    * @param ordNumber 
+    * @return void 
+    **/
+    private static void createFile(Blob fileContent, ID caseId, String ordNumber){
+        ContentVersion conVer = new ContentVersion();
+        conVer.ContentLocation = 'S'; // S specify this document is in SF, use E for external files
+        conVer.PathOnClient = 'Return_Tag_EO_'+ordNumber+'.pdf'; // The files name, extension is very important here which will help the file in preview.
+        conVer.Title = 'Return_Tag_EO_'+ordNumber; // Display name of the files
+        conVer.VersionData = fileContent; //must be Blob
+        insert conVer;
+
+        // First get the content document Id from ContentVersion
+        Id conDoc = [SELECT ContentDocumentId FROM ContentVersion WHERE Id =:conVer.Id].ContentDocumentId;
+
+        //Create ContentDocumentLink
+        ContentDocumentLink cDe = new ContentDocumentLink();
+        cDe.ContentDocumentId = conDoc;
+        cDe.LinkedEntityId = caseId; // you can use objectId,GroupId etc
+        cDe.ShareType = 'I'; // Inferred permission, checkout description of ContentDocumentLink object for more details
+        cDe.Visibility = 'AllUsers';
+        insert cDe;
+    }
+
+}
